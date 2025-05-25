@@ -2,91 +2,150 @@ using UnityEngine;
 
 public class EvalueateBurger : MonoBehaviour
 {
+    [Header("Evaluation Settings")]
+    [SerializeField] private float fastTimeThreshold = 30f;
+    [SerializeField] private int speedBonus = 5;
+    [SerializeField] private float perfectHealthGain = 0.5f;
+    [SerializeField] private float poorHealthLoss = -1f;
+
+    [Header("Legacy Data")]
     public Scoredata[] scoredata;
     public BurgerRecipe[] burgerRecipes;
-    public GameObject submitedBurger;
-    public int requestBurgerNum;
-    OrderController orderController;
-    CustomerOrderSystem customerOrderSystem;
-    [SerializeField] CustomerOrderInfo customerOrderInfo;
-    void Start()
+
+    private GameObject submitedBurger;
+    private OrderController orderController;
+    private CustomerOrderSystem customerOrderSystem;
+    private CustomerOrderInfo customerOrderInfo;
+
+    private void Start()
     {
         orderController = FindObjectOfType<OrderController>();
         customerOrderSystem = FindObjectOfType<CustomerOrderSystem>();
         submitedBurger = GameObject.Find("DropArea");
     }
-    //고객에게 버거 드래그 제출 시 평가
+
     public void OnEvalue()
     {
         customerOrderSystem.IsMaking = false;
-        requestBurgerNum = orderController.GetburgerId();
-        BurgerScore(submitedBurger, requestBurgerNum);
-        if (orderController != null)
-        {
-            orderController.NewOrder();
-        }
-    }
-    public Scoredata GetScoredatas(int n)
-    {
-        return scoredata[n];
-    }
-    // 버거 상태에 따라 점수가 주어지고 대화문 출력
-    public void BurgerScore(GameObject burger, int requestBurgerNum)
-    {
-        for (int scoredataIndex = 0; scoredataIndex <= scoredata.Length / 2; scoredataIndex++)
-        {
-            if (scoredata[scoredataIndex].Time >= GameManager.instance.takenTime)
-            {
-                if (IsPerferctBurger(burger, burgerRecipes[requestBurgerNum]))
-                {
-                    scoredataIndex += 3;
-                }
-                int customerIndex = orderController.GetCustomerIndex();
-                GameManager.instance.score += scoredata[scoredataIndex].score[customerIndex];
-                GameManager.instance.health += scoredata[scoredataIndex].health;
-                GameManager.instance.Dialog = scoredata[scoredataIndex].dialog[customerIndex];
-                GameManager.instance.takenTime = 0;
-                SetCustomerFace_PlaySound(scoredataIndex);
-                break;
-            }
-        }
+
+        // 1. 버거 데이터 수집
+        var droppable = submitedBurger?.GetComponent<IDroppable>();
+        if (droppable == null) return;
+
+        BurgerData submittedBurgerData = droppable.GetBurgerData();
+
+        // 2. 타겟 레시피
+        int requestBurgerNum = orderController.GetburgerId();
+        if (requestBurgerNum >= burgerRecipes.Length) return;
+
+        BurgerRecipe targetRecipe = burgerRecipes[requestBurgerNum];
+
+        // 3. 평가 실행
+        EvaluationResult result = EvaluateBurger(submittedBurgerData, targetRecipe);
+
+        // 4. 결과 적용
+        ApplyResult(result);
+
+        // 5. 다음 주문
+        orderController?.NewOrder();
     }
 
-    void SetCustomerFace_PlaySound(int scoredataIndex)
+    private EvaluationResult EvaluateBurger(BurgerData burger, BurgerRecipe recipe)
     {
-        customerOrderInfo = FindObjectOfType<CustomerOrderInfo>(); //손님오기전에 버거를 만들면 OrderInfo를 못찾아서 여기로 옮겼습니다.
-        if (scoredataIndex >= 0 && scoredataIndex <= 3)
+        // 정확도 계산
+        float accuracy = recipe.CalculateAccuracy(burger);
+        bool isPerfect = recipe.MatchesExactly(burger);
+
+        // 점수 계산
+        int baseScore = isPerfect ? recipe.perfectScore :
+                       accuracy >= 0.7f ? recipe.goodScore : recipe.poorScore;
+
+        // 시간 보너스
+        float timeTaken = GameManager.instance.takenTime;
+        int finalScore = (timeTaken <= fastTimeThreshold && baseScore > 0) ?
+                        baseScore + speedBonus : baseScore;
+
+        // 체력 변화
+        float healthChange = isPerfect ? perfectHealthGain :
+                           accuracy < 0.3f ? poorHealthLoss : 0f;
+
+        // 피드백
+        string feedback = GenerateFeedback(accuracy, isPerfect, timeTaken);
+
+        return new EvaluationResult
         {
-            customerOrderInfo.SetCustomerSadFace();
-            SoundManager.instance.PlaySFX(SoundManager.ESfx.SFX_LOSTHEALTH);
+            isPerfect = isPerfect,
+            accuracy = accuracy,
+            score = finalScore,
+            healthChange = healthChange,
+            feedback = feedback
+        };
+    }
+
+    private string GenerateFeedback(float accuracy, bool isPerfect, float timeTaken)
+    {
+        if (isPerfect)
+        {
+            return timeTaken <= fastTimeThreshold ?
+                   "Perfect and fast! Outstanding!" :
+                   "Perfect burger! Customer is delighted!";
         }
-        else if (scoredataIndex >= 4 && scoredataIndex <= 5)
+        else if (accuracy >= 0.7f)
         {
-            customerOrderInfo.SetCustomerHappyFace();
-            SoundManager.instance.PlaySFX(SoundManager.ESfx.SFX_SCORE);
+            return "Good job! Customer is satisfied.";
         }
         else
         {
-            customerOrderInfo.SetCustomerNormalFace();
-            SoundManager.instance.PlaySFX(SoundManager.ESfx.SFX_SCORE);
-
+            return "Customer is disappointed...";
         }
     }
 
-    //버거가 완벽한지 판단
+    private void ApplyResult(EvaluationResult result)
+    {
+        // 점수 및 체력 적용
+        GameManager.instance.score += result.score;
+        GameManager.instance.health += result.healthChange;
+
+        // 대화 설정
+        GameManager.instance.Dialog = result.feedback;
+
+        // 고객 표정
+        customerOrderInfo = FindObjectOfType<CustomerOrderInfo>();
+        if (customerOrderInfo != null)
+        {
+            if (result.isPerfect || result.accuracy >= 0.7f)
+                customerOrderInfo.SetCustomerHappyFace();
+            else if (result.accuracy >= 0.3f)
+                customerOrderInfo.SetCustomerNormalFace();
+            else
+                customerOrderInfo.SetCustomerSadFace();
+        }
+
+        // 사운드
+        if (SoundManager.instance != null)
+        {
+            if (result.score > 0)
+                SoundManager.instance.PlaySFX(SoundManager.ESfx.SFX_SCORE);
+            else
+                SoundManager.instance.PlaySFX(SoundManager.ESfx.SFX_LOSTHEALTH);
+        }
+
+        // 시간 초기화
+        GameManager.instance.takenTime = 0;
+    }
+
+    // 기존 메서드들 (호환성)
+    public Scoredata GetScoredatas(int n)
+    {
+        return n >= 0 && n < scoredata.Length ? scoredata[n] : null;
+    }
+
     public bool IsPerferctBurger(GameObject items, BurgerRecipe recipe)
     {
-        for (int i = 0; i < recipe.ingredients.Count; i++)
-        {
-            if (items.transform.childCount != recipe.ingredients.Count)
-            {
-                return false;
-            }
-            else if (recipe.ingredients[i].transform.name != items.transform.GetChild(i).name)
-            {
-                return false;
-            }
-        }
-        return true;
+        var droppable = items.GetComponent<IDroppable>();
+        if (droppable == null) return false;
+
+        var burgerData = droppable.GetBurgerData();
+        return recipe.MatchesExactly(burgerData);
     }
 }
